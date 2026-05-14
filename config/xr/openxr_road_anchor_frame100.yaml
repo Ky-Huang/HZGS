@@ -1,0 +1,27 @@
+scene_from_tracking:
+- - -0.849919683
+  - 0.232752853
+  - -0.472718354
+  - -5.27095179
+- - -0.526703631
+  - -0.400530163
+  - 0.749772548
+  - -22.5773767
+- - -0.0148262594
+  - 0.88622892
+  - 0.463010242
+  - 16.7564177
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+near_z: 0.01
+far_z: 100.0
+resolution_scale: 1.0
+default_image_type: street
+eye_image_types:
+  left: street
+  right: street
+default_image_rect:
+  width: 1832
+  height: 1920

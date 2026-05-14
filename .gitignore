@@ -19,3 +19,9 @@ sky0.hdr
 Car.obj
 res.txt
 road_subset_preview.mp4
+hkenvironment-win.yml
+requirements-pip.txt
+env_export/
+environment-conda-history.yml
+environment.yml
+requirements-pip-raw.txt

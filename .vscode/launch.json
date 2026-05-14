@@ -64,7 +64,7 @@
             "console": "integratedTerminal",
             // "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "4"
+                // "CUDA_VISIBLE_DEVICES": "4"
             },
             "args": [
                 "-m",
@@ -75,7 +75,7 @@
                 // "4",
                 // "--lazy_load_images",
                 "--render_only",
-                "--render_point_cloud",
+                // "--render_point_cloud",
 
                 // "--enable_hybrid_render",
                 // "--hybrid_mesh_backend",

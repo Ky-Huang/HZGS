@@ -914,6 +914,9 @@ def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, ape_code, 
                 xr_socket_host=getattr(dataset, "xr_socket_host", "127.0.0.1"),
                 xr_socket_port=int(getattr(dataset, "xr_socket_port", 6110)),
                 xr_max_frames=int(getattr(dataset, "xr_max_frames", -1)),
+                xr_match_swapchain_resolution_scale=bool(
+                    getattr(dataset, "xr_match_swapchain_resolution_scale", False)
+                ),
             )
             return
 
@@ -1009,6 +1012,7 @@ if __name__ == "__main__":
     parser.add_argument("--xr_socket_host", type=str, default="127.0.0.1")
     parser.add_argument("--xr_socket_port", type=int, default=6110)
     parser.add_argument("--xr_max_frames", type=int, default=-1)
+    parser.add_argument("--xr_match_swapchain_resolution_scale", action="store_true")
     parser.add_argument("--fix-lod", type=int, default=-1)
     args = parser.parse_args(sys.argv[1:])
     _apply_hybrid_render_car_preset(args, sys.argv[1:])
@@ -1056,6 +1060,7 @@ if __name__ == "__main__":
         lp.xr_socket_host = args.xr_socket_host
         lp.xr_socket_port = args.xr_socket_port
         lp.xr_max_frames = args.xr_max_frames
+        lp.xr_match_swapchain_resolution_scale = args.xr_match_swapchain_resolution_scale
         lp.fix_lod = args.fix_lod if args.fix_lod >= 0 else getattr(lp, "fix_lod", -1)
         lp.render_point_cloud = args.render_point_cloud
     if args.enable_hybrid_render:

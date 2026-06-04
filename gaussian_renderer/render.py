@@ -10,8 +10,90 @@
 #
 import torch
 import math
+import os
+import time
 import gsplat
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
+
+
+def _render_profile_enabled():
+    return os.environ.get("HGS_XR_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _slow_render_threshold_ms():
+    try:
+        return float(os.environ.get("HGS_XR_SLOW_RENDER_MS", "150"))
+    except ValueError:
+        return 150.0
+
+
+def _sync_cuda_for_profile():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _elapsed_ms(start_time):
+    return (time.perf_counter() - start_time) * 1000.0
+
+
+def _profile_stage(profile, name, start_time):
+    if profile is None:
+        return
+    _sync_cuda_for_profile()
+    profile["stages_ms"][name] = _elapsed_ms(start_time)
+
+
+def _camera_center_list(viewpoint_camera):
+    try:
+        return [round(float(x), 4) for x in viewpoint_camera.camera_center.detach().cpu().tolist()]
+    except Exception:
+        return []
+
+
+def _count_true(mask):
+    if mask is None:
+        return -1
+    return int(mask.sum().item())
+
+
+def _radii_stats(radii):
+    visible = radii[radii > 0]
+    if visible.numel() == 0:
+        return 0, 0.0, 0.0
+    return (
+        int(visible.numel()),
+        float(visible.max().item()),
+        float(torch.quantile(visible.float(), 0.95).item()),
+    )
+
+
+def _maybe_log_slow_render(viewpoint_camera, pc, profile, visible_mask, selection_mask, radii):
+    if profile is None:
+        return
+    total_ms = sum(profile["stages_ms"].values())
+    if total_ms < _slow_render_threshold_ms():
+        return
+
+    visible_count, radii_max, radii_p95 = _radii_stats(radii)
+    details = {
+        "camera": getattr(viewpoint_camera, "image_name", ""),
+        "image_type": getattr(viewpoint_camera, "image_type", ""),
+        "size": f"{int(viewpoint_camera.image_width)}x{int(viewpoint_camera.image_height)}",
+        "total_ms": round(total_ms, 2),
+        "stages_ms": {key: round(value, 2) for key, value in profile["stages_ms"].items()},
+        "lod_selected": _count_true(profile.get("lod_mask")),
+        "prefilter_selected": _count_true(visible_mask),
+        "generated_gaussians": int(profile.get("generated_gaussians", -1)),
+        "selection_count": _count_true(selection_mask),
+        "raster_visible": visible_count,
+        "radii_max": round(radii_max, 2),
+        "radii_p95": round(radii_p95, 2),
+        "resolution_scale": float(getattr(viewpoint_camera, "resolution_scale", -1.0)),
+        "camera_center": _camera_center_list(viewpoint_camera),
+        "gs_attr": getattr(pc, "gs_attr", ""),
+        "render_mode": getattr(pc, "render_mode", ""),
+    }
+    print("[render-slow] " + " ".join(f"{key}={value}" for key, value in details.items()), flush=True)
 
 def render(viewpoint_camera, pc, pipe, bg_color):
     """
@@ -19,14 +101,37 @@ def render(viewpoint_camera, pc, pipe, bg_color):
     
     Background tensor (bg_color) must be on GPU!
     """
+    profile = {"stages_ms": {}} if _render_profile_enabled() else None
     if pc.explicit_gs:
+        t0 = time.perf_counter() if profile is not None else None
         pc.set_gs_mask(viewpoint_camera.camera_center, viewpoint_camera.resolution_scale)
         visible_mask = pc._gs_mask
+        if profile is not None:
+            profile["lod_mask"] = visible_mask
+            _profile_stage(profile, "set_gs_mask", t0)
+
+        t0 = time.perf_counter() if profile is not None else None
         xyz, color, opacity, scaling, rot, sh_degree, selection_mask = pc.generate_explicit_gaussians(visible_mask)
+        if profile is not None:
+            profile["generated_gaussians"] = int(xyz.shape[0])
+            _profile_stage(profile, "generate_gaussians", t0)
     else:
+        t0 = time.perf_counter() if profile is not None else None
         pc.set_anchor_mask(viewpoint_camera.camera_center, viewpoint_camera.resolution_scale)
-        visible_mask = prefilter_voxel(viewpoint_camera, pc).squeeze() if pipe.add_prefilter else pc._anchor_mask    
+        if profile is not None:
+            profile["lod_mask"] = pc._anchor_mask
+            _profile_stage(profile, "set_anchor_mask", t0)
+
+        t0 = time.perf_counter() if profile is not None else None
+        visible_mask = prefilter_voxel(viewpoint_camera, pc).squeeze() if pipe.add_prefilter else pc._anchor_mask
+        if profile is not None:
+            _profile_stage(profile, "prefilter", t0)
+
+        t0 = time.perf_counter() if profile is not None else None
         xyz, offset, color, opacity, scaling, rot, sh_degree, selection_mask = pc.generate_neural_gaussians(viewpoint_camera, visible_mask)
+        if profile is not None:
+            profile["generated_gaussians"] = int(xyz.shape[0])
+            _profile_stage(profile, "generate_gaussians", t0)
 
     # Set up rasterization configuration
     K = torch.tensor([
@@ -37,6 +142,7 @@ def render(viewpoint_camera, pc, pipe, bg_color):
     viewmat = viewpoint_camera.world_view_transform.transpose(0, 1) # [4, 4]
 
     if pc.gs_attr == "3D":
+        t0 = time.perf_counter() if profile is not None else None
         render_colors, render_alphas, info = gsplat.rasterization(
             means=xyz,  # [N, 3]
             quats=rot,  # [N, 4]
@@ -52,7 +158,10 @@ def render(viewpoint_camera, pc, pipe, bg_color):
             sh_degree=sh_degree,
             render_mode=pc.render_mode,
         )
+        if profile is not None:
+            _profile_stage(profile, "raster", t0)
     elif pc.gs_attr == "2D":
+        t0 = time.perf_counter() if profile is not None else None
         (render_colors, 
         render_alphas,
         render_normals,
@@ -74,6 +183,8 @@ def render(viewpoint_camera, pc, pipe, bg_color):
             sh_degree=sh_degree,
             render_mode=pc.render_mode,
         )
+        if profile is not None:
+            _profile_stage(profile, "raster", t0)
     else:
         raise ValueError(f"Unknown gs_attr: {pc.gs_attr}")
 
@@ -107,6 +218,9 @@ def render(viewpoint_camera, pc, pipe, bg_color):
         "radii": radii,
         "render_alphas": render_alphas,
     }
+    if profile is not None:
+        return_dict["_render_profile"] = profile
+        _maybe_log_slow_render(viewpoint_camera, pc, profile, visible_mask, selection_mask, radii)
     
     if pc.gs_attr == "2D":
         return_dict.update({

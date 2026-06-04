@@ -333,7 +333,8 @@ public:
         int frameId,
         XrTime predictedDisplayTime,
         const std::vector<XrView>& views,
-        const std::vector<Swapchain>& swapchains)
+        const std::vector<Swapchain>& swapchains,
+        float swapchainScale)
     {
         if (!isConnected()) {
             return;
@@ -346,6 +347,7 @@ public:
         oss << std::fixed << std::setprecision(9);
         oss << "{\"frame_id\":" << frameId
             << ",\"timestamp_ns\":" << static_cast<long long>(predictedDisplayTime)
+            << ",\"swapchain_scale\":" << swapchainScale
             << ",\"views\":{";
         appendEyeJson(oss, "left", views[0], swapchains[0]);
         oss << ",";
@@ -477,7 +479,8 @@ public:
         int frameId,
         XrTime predictedDisplayTime,
         const std::vector<XrView>& views,
-        const std::vector<Swapchain>& swapchains)
+        const std::vector<Swapchain>& swapchains,
+        float swapchainScale)
     {
         if (!running_ || views.size() < 2 || swapchains.size() < 2) {
             return;
@@ -487,6 +490,7 @@ public:
         oss << std::fixed << std::setprecision(9);
         oss << "{\"frame_id\":" << frameId
             << ",\"timestamp_ns\":" << static_cast<long long>(predictedDisplayTime)
+            << ",\"swapchain_scale\":" << swapchainScale
             << ",\"views\":{";
         appendEyeJson(oss, "left", views[0], swapchains[0]);
         oss << ",";
@@ -1290,9 +1294,19 @@ private:
                 const auto now = std::chrono::steady_clock::now();
                 const float seconds = std::chrono::duration<float>(now - start).count();
                 if (options_.hgsStreamEnabled) {
-                    hgsStreamClient_.submitFrame(renderedFrames, frameState.predictedDisplayTime, views, swapchains_);
+                    hgsStreamClient_.submitFrame(
+                        renderedFrames,
+                        frameState.predictedDisplayTime,
+                        views,
+                        swapchains_,
+                        options_.swapchainScale);
                 } else if (poseSocket_.isConnected()) {
-                    poseSocket_.sendFrame(renderedFrames, frameState.predictedDisplayTime, views, swapchains_);
+                    poseSocket_.sendFrame(
+                        renderedFrames,
+                        frameState.predictedDisplayTime,
+                        views,
+                        swapchains_,
+                        options_.swapchainScale);
                 }
 
                 for (uint32_t eye = 0; eye < swapchains_.size(); ++eye) {

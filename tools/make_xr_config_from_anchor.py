@@ -1,3 +1,19 @@
+"""
+Create an XR config by aligning a captured OpenXR pose to a known scene camera.
+
+Example:
+  conda run -n horizon_gs_py_312_pt271_cu126 python tools/make_xr_config_from_anchor.py \
+    --source_path data/real/road_subset \
+    --source_image_path data/real/road_subset/images/street_cam1/TIMELAPSE_0371.JPG \
+    --xr_frame outputs/horizongs/real/road_subset/fine/xr_anchor_capture_frame100/ours_40000/xr_input_frames.jsonl \
+    --base_config config/xr/openxr_road_anchor_frame100.yaml \
+    --output config/xr/openxr_road_anchor_new.yaml
+
+Use --cameras_json and --camera_name instead of --source_path and
+--source_image_path when the anchor camera comes from cameras.json.
+The generated config aligns both start position and start orientation.
+"""
+
 import argparse
 import json
 import math

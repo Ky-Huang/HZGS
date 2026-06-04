@@ -1,0 +1,30 @@
+# Position-only OpenXR start anchor for train/street/renders/00055.png.
+# Source camera: data/real/road_subset/images/street_cam1/TIMELAPSE_0371.JPG
+# Based on openxr_road_anchor_frame100.yaml; only the start translation changed.
+scene_from_tracking:
+- - -0.849919683
+  - 0.232752853
+  - -0.472718354
+  - 0.805256963
+- - -0.526703631
+  - -0.400530163
+  - 0.749772548
+  - -29.502653
+- - -0.0148262594
+  - 0.88622892
+  - 0.463010242
+  - 16.8563683
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+near_z: 0.01
+far_z: 100.0
+resolution_scale: 1.0
+default_image_type: street
+eye_image_types:
+  left: street
+  right: street
+default_image_rect:
+  width: 1832
+  height: 1920

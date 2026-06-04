@@ -13,6 +13,9 @@ from xr.frame_sources import SocketFrameSource, load_xr_frames
 from xr.openxr_bridge import build_minicam_from_openxr_view, load_xr_session_config
 
 
+_OVERLAY_FONT_CACHE = {}
+
+
 def _read_rgb_frame(path):
     with Image.open(path) as image:
         return np.array(image.convert("RGB"), dtype=np.uint8)
@@ -68,7 +71,66 @@ def _render_stereo_frame(frame, config, gaussians, pipe, background, render_fn):
     return left_cam, right_cam, left_rgb, right_rgb
 
 
-def _tensor_to_rgba8_bytes(image):
+def _load_overlay_font(image_height):
+    from PIL import ImageFont
+
+    font_size = max(16, min(56, int(image_height) // 20))
+    if font_size in _OVERLAY_FONT_CACHE:
+        return _OVERLAY_FONT_CACHE[font_size]
+
+    font = None
+    for font_name in ("arial.ttf", "DejaVuSans.ttf"):
+        try:
+            font = ImageFont.truetype(font_name, font_size)
+            break
+        except OSError:
+            pass
+    if font is None:
+        font = ImageFont.load_default()
+
+    _OVERLAY_FONT_CACHE[font_size] = font
+    return font
+
+
+def _draw_rgba_text_overlay(image_u8, text):
+    if not text:
+        return image_u8
+
+    from PIL import ImageDraw
+
+    height, width = image_u8.shape[:2]
+    image = Image.fromarray(image_u8)
+    draw = ImageDraw.Draw(image)
+    font = _load_overlay_font(height)
+    padding = max(4, height // 90)
+    margin_x = max(8, width // 32)
+    margin_y = max(8, height // 32)
+
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+    except AttributeError:
+        text_width, text_height = draw.textsize(text, font=font)
+        bbox = (0, 0, text_width, text_height)
+
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    rect = (
+        margin_x,
+        margin_y,
+        margin_x + text_width + padding * 2,
+        margin_y + text_height + padding * 2,
+    )
+    draw.rectangle(rect, fill=(0, 0, 0, 255))
+    draw.text(
+        (margin_x + padding - bbox[0], margin_y + padding - bbox[1]),
+        text,
+        font=font,
+        fill=(255, 255, 255, 255),
+    )
+    return np.array(image, dtype=np.uint8)
+
+
+def _tensor_to_rgba8_bytes(image, overlay_text=None):
     image = torch.clamp(image.detach(), 0.0, 1.0)
     if image.shape[0] == 3:
         alpha = torch.ones((1, image.shape[1], image.shape[2]), device=image.device, dtype=image.dtype)
@@ -77,8 +139,58 @@ def _tensor_to_rgba8_bytes(image):
         raise ValueError(f"Expected 3 or 4 image channels, got {image.shape[0]}.")
 
     image_u8 = (image.permute(1, 2, 0).contiguous() * 255.0).byte().cpu().numpy()
+    image_u8 = _draw_rgba_text_overlay(image_u8, overlay_text)
     height, width = image_u8.shape[:2]
     return image_u8.tobytes(), width, height
+
+
+class _StreamFpsMeter:
+    def __init__(self, log_interval=1.0):
+        import time
+
+        self._time = time
+        self.log_interval = float(log_interval)
+        self.start_time = None
+        self.last_frame_time = None
+        self.last_log_time = self._time.perf_counter()
+        self.total_frames = 0
+        self.current_fps = 0.0
+
+    def overlay_text(self):
+        if self.current_fps <= 0.0:
+            return "FPS --.-"
+        return f"FPS {self.current_fps:5.1f}"
+
+    def mark_frame_sent(self):
+        now = self._time.perf_counter()
+        if self.start_time is None:
+            self.start_time = now
+        if self.last_frame_time is not None:
+            elapsed = now - self.last_frame_time
+            if elapsed > 1e-6:
+                instant_fps = 1.0 / elapsed
+                if self.current_fps <= 0.0:
+                    self.current_fps = instant_fps
+                else:
+                    self.current_fps = self.current_fps * 0.85 + instant_fps * 0.15
+        self.last_frame_time = now
+        self.total_frames += 1
+        return now
+
+    def average_fps(self, now=None):
+        if self.start_time is None or self.total_frames <= 1:
+            return 0.0
+        now = self._time.perf_counter() if now is None else now
+        elapsed = now - self.start_time
+        if elapsed <= 1e-6:
+            return 0.0
+        return float(self.total_frames - 1) / elapsed
+
+    def should_log(self, now):
+        if now - self.last_log_time < self.log_interval:
+            return False
+        self.last_log_time = now
+        return True
 
 
 def _sendall(conn, payload):
@@ -105,6 +217,7 @@ def _run_openxr_stream_session(
         conn, addr = listener.accept()
         print(f"[openxr-stream] connected by {addr}")
         rendered_count = 0
+        fps_meter = _StreamFpsMeter()
         with conn:
             reader = conn.makefile("rb")
             while True:
@@ -126,8 +239,9 @@ def _run_openxr_stream_session(
                     background,
                     render_fn,
                 )
-                left_bytes, left_width, left_height = _tensor_to_rgba8_bytes(left_rgb)
-                right_bytes, right_width, right_height = _tensor_to_rgba8_bytes(right_rgb)
+                overlay_text = fps_meter.overlay_text()
+                left_bytes, left_width, left_height = _tensor_to_rgba8_bytes(left_rgb, overlay_text)
+                right_bytes, right_width, right_height = _tensor_to_rgba8_bytes(right_rgb, overlay_text)
                 if left_width != right_width or left_height != right_height:
                     raise ValueError("Left and right stream images must have matching dimensions.")
 
@@ -139,11 +253,24 @@ def _run_openxr_stream_session(
                 _sendall(conn, left_bytes)
                 _sendall(conn, right_bytes)
                 rendered_count += 1
-                print(f"[openxr-stream] sent frame {frame_id} ({left_width}x{left_height})")
+                now = fps_meter.mark_frame_sent()
+                if fps_meter.should_log(now):
+                    print(
+                        f"[openxr-stream] fps={fps_meter.current_fps:.1f} "
+                        f"avg={fps_meter.average_fps(now):.1f} sent={rendered_count} "
+                        f"last_frame={frame_id} ({left_width}x{left_height})",
+                        flush=True,
+                    )
     finally:
         listener.close()
 
-    print("[openxr-stream] session ended")
+    if "fps_meter" in locals() and fps_meter.total_frames > 0:
+        print(
+            f"[openxr-stream] session ended, sent={fps_meter.total_frames} "
+            f"avg_fps={fps_meter.average_fps():.1f}"
+        )
+    else:
+        print("[openxr-stream] session ended")
     return True
 
 

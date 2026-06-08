@@ -319,7 +319,7 @@ def render_motion_vectors(viewpoint_camera_a, viewpoint_camera_b, pc, pipe, bg_c
         "selection_mask": selection_mask,
     }
 
-def prefilter_voxel(viewpoint_camera, pc):
+def prefilter_voxel(viewpoint_camera, pc, return_stats=False):
     """
     Render the scene. 
     
@@ -392,8 +392,27 @@ def prefilter_voxel(viewpoint_camera, pc):
     # The results are with shape [C, N, ...]. Only the elements with radii > 0 are valid.
     radii, means2d, depths, conics, compensations = proj_results
     camera_ids, gaussian_ids = None, None
+    radii_flat = radii.squeeze(0)
     
     visible_mask = pc._anchor_mask.clone()
-    visible_mask[pc._anchor_mask] = radii.squeeze(0) > 0
+    visible_mask[pc._anchor_mask] = radii_flat > 0
+
+    if return_stats:
+        visible_radii = radii_flat[radii_flat > 0].float()
+        if visible_radii.numel() == 0:
+            stats = {
+                "raster_visible": 0,
+                "radii_max": 0.0,
+                "radii_p95": 0.0,
+                "radii2_sum": 0.0,
+            }
+        else:
+            stats = {
+                "raster_visible": int(visible_radii.numel()),
+                "radii_max": float(visible_radii.max().item()),
+                "radii_p95": float(torch.quantile(visible_radii, 0.95).item()),
+                "radii2_sum": float((visible_radii * visible_radii).sum().item()),
+            }
+        return visible_mask, stats
 
     return visible_mask

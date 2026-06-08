@@ -91,6 +91,314 @@ def _match_resolution_scale_to_swapchain(config, frame, enabled):
     return abs(previous - matched_resolution_scale) > 1e-6
 
 
+def _preflight_log_enabled_from_env():
+    return os.environ.get("HGS_XR_PREFLIGHT_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _preflight_guard_enabled_from_env():
+    return os.environ.get("HGS_XR_PREFLIGHT_GUARD", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _preflight_log_every_from_env():
+    try:
+        return max(int(os.environ.get("HGS_XR_PREFLIGHT_LOG_EVERY", "1")), 1)
+    except ValueError:
+        return 1
+
+
+def _preflight_int_limit_from_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = int(default)
+    return value if value > 0 else None
+
+
+def _preflight_float_limit_from_env(name, default):
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        value = float(default)
+    return value if value > 0.0 else None
+
+
+def _preflight_guard_cooldown_seconds_from_env():
+    try:
+        cooldown_ms = float(os.environ.get("HGS_XR_PREFLIGHT_GUARD_COOLDOWN_MS", "750"))
+    except ValueError:
+        cooldown_ms = 750.0
+    return max(cooldown_ms, 0.0) / 1000.0
+
+
+def _format_preflight_value(value):
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value).replace(" ", "_")
+
+
+def _collect_preflight_eye_stats(eye, viewpoint_camera, gaussians, pipe):
+    import time
+
+    from gaussian_renderer.render import prefilter_voxel
+
+    t0 = time.perf_counter()
+    stats = {
+        "eye": eye,
+        "size": f"{int(viewpoint_camera.image_width)}x{int(viewpoint_camera.image_height)}",
+        "resolution_scale": float(getattr(viewpoint_camera, "resolution_scale", 1.0)),
+        "image_type": getattr(viewpoint_camera, "image_type", ""),
+        "add_prefilter": int(bool(getattr(pipe, "add_prefilter", False))),
+    }
+
+    if getattr(gaussians, "explicit_gs", False):
+        gaussians.set_gs_mask(viewpoint_camera.camera_center, viewpoint_camera.resolution_scale)
+        selected_count = int(gaussians._gs_mask.sum().item())
+        stats.update(
+            {
+                "model": "explicit",
+                "total_gaussians": int(getattr(gaussians, "_xyz").shape[0]),
+                "lod_selected": selected_count,
+                "prefilter_selected": selected_count,
+                "estimated_gaussians": selected_count,
+            }
+        )
+    else:
+        gaussians.set_anchor_mask(viewpoint_camera.camera_center, viewpoint_camera.resolution_scale)
+        lod_selected = int(gaussians._anchor_mask.sum().item())
+        n_offsets = int(getattr(gaussians, "n_offsets", 1))
+        prefilter_selected = lod_selected
+        prefilter_stats = {}
+
+        if bool(getattr(pipe, "add_prefilter", False)) and lod_selected > 0:
+            visible_mask, prefilter_stats = prefilter_voxel(viewpoint_camera, gaussians, return_stats=True)
+            prefilter_selected = int(visible_mask.sum().item())
+
+        stats.update(
+            {
+                "model": "anchor",
+                "total_anchors": int(gaussians.get_anchor.shape[0]),
+                "n_offsets": n_offsets,
+                "lod_selected": lod_selected,
+                "prefilter_selected": prefilter_selected,
+                "estimated_gaussians": prefilter_selected * n_offsets,
+            }
+        )
+        if prefilter_stats:
+            stats.update(
+                {
+                    "anchor_raster_visible": int(prefilter_stats.get("raster_visible", 0)),
+                    "anchor_radii_max": float(prefilter_stats.get("radii_max", 0.0)),
+                    "anchor_radii_p95": float(prefilter_stats.get("radii_p95", 0.0)),
+                    "anchor_radii2_sum": float(prefilter_stats.get("radii2_sum", 0.0)),
+                }
+            )
+
+    stats["preflight_ms"] = (time.perf_counter() - t0) * 1000.0
+    return stats
+
+
+def _log_preflight_frame(frame, left_cam, right_cam, gaussians, pipe):
+    frame_id = int(frame.get("frame_id", 0))
+    every = _preflight_log_every_from_env()
+    if every > 1 and frame_id % every != 0:
+        return
+
+    field_order = [
+        "frame_id",
+        "eye",
+        "model",
+        "size",
+        "resolution_scale",
+        "image_type",
+        "add_prefilter",
+        "total_anchors",
+        "total_gaussians",
+        "n_offsets",
+        "lod_selected",
+        "prefilter_selected",
+        "estimated_gaussians",
+        "anchor_raster_visible",
+        "anchor_radii_p95",
+        "anchor_radii_max",
+        "anchor_radii2_sum",
+        "preflight_ms",
+        "error",
+    ]
+
+    for eye, camera in (("left", left_cam), ("right", right_cam)):
+        try:
+            stats = _collect_preflight_eye_stats(eye, camera, gaussians, pipe)
+            stats["frame_id"] = frame_id
+        except Exception as exc:
+            stats = {
+                "frame_id": frame_id,
+                "eye": eye,
+                "error": f"{type(exc).__name__}:{str(exc)}",
+            }
+        parts = []
+        for key in field_order:
+            if key in stats:
+                parts.append(f"{key}={_format_preflight_value(stats[key])}")
+        print("[xr-preflight] " + " ".join(parts), flush=True)
+
+
+def _collect_preflight_frame_stats(left_cam, right_cam, gaussians, pipe):
+    stats_list = []
+    for eye, camera in (("left", left_cam), ("right", right_cam)):
+        try:
+            stats_list.append(_collect_preflight_eye_stats(eye, camera, gaussians, pipe))
+        except Exception as exc:
+            stats_list.append(
+                {
+                    "eye": eye,
+                    "error": f"{type(exc).__name__}:{str(exc)}",
+                }
+            )
+    return stats_list
+
+
+def _log_preflight_stats(frame, stats_list):
+    frame_id = int(frame.get("frame_id", 0))
+    every = _preflight_log_every_from_env()
+    if every > 1 and frame_id % every != 0:
+        return
+
+    field_order = [
+        "frame_id",
+        "eye",
+        "model",
+        "size",
+        "resolution_scale",
+        "image_type",
+        "add_prefilter",
+        "total_anchors",
+        "total_gaussians",
+        "n_offsets",
+        "lod_selected",
+        "prefilter_selected",
+        "estimated_gaussians",
+        "anchor_raster_visible",
+        "anchor_radii_p95",
+        "anchor_radii_max",
+        "anchor_radii2_sum",
+        "preflight_ms",
+        "error",
+    ]
+    for stats in stats_list:
+        row = dict(stats)
+        row["frame_id"] = frame_id
+        parts = []
+        for key in field_order:
+            if key in row:
+                parts.append(f"{key}={_format_preflight_value(row[key])}")
+        print("[xr-preflight] " + " ".join(parts), flush=True)
+
+
+def _preflight_guard_reason(stats_list):
+    if not _preflight_guard_enabled_from_env():
+        return ""
+
+    max_prefilter_selected = _preflight_int_limit_from_env(
+        "HGS_XR_PREFLIGHT_MAX_PREFILTER_SELECTED",
+        850000,
+    )
+    max_estimated_gaussians = _preflight_int_limit_from_env(
+        "HGS_XR_PREFLIGHT_MAX_ESTIMATED_GAUSSIANS",
+        8500000,
+    )
+    max_anchor_radii2_sum = _preflight_float_limit_from_env(
+        "HGS_XR_PREFLIGHT_MAX_ANCHOR_RADII2_SUM",
+        0.0,
+    )
+    max_anchor_radii = _preflight_float_limit_from_env(
+        "HGS_XR_PREFLIGHT_MAX_ANCHOR_RADII",
+        0.0,
+    )
+
+    reasons = []
+    for stats in stats_list:
+        eye = stats.get("eye", "?")
+        checks = [
+            ("prefilter_selected", max_prefilter_selected),
+            ("estimated_gaussians", max_estimated_gaussians),
+            ("anchor_radii2_sum", max_anchor_radii2_sum),
+            ("anchor_radii_max", max_anchor_radii),
+        ]
+        for key, limit in checks:
+            if limit is None or key not in stats:
+                continue
+            value = stats[key]
+            if value > limit:
+                reasons.append(
+                    f"{eye}.{key}={_format_preflight_value(value)}>{_format_preflight_value(limit)}"
+                )
+    return ",".join(reasons)
+
+
+def _preflight_guard_config_summary():
+    if not _preflight_guard_enabled_from_env():
+        return "disabled"
+    values = {
+        "max_prefilter_selected": _preflight_int_limit_from_env(
+            "HGS_XR_PREFLIGHT_MAX_PREFILTER_SELECTED",
+            850000,
+        ),
+        "max_estimated_gaussians": _preflight_int_limit_from_env(
+            "HGS_XR_PREFLIGHT_MAX_ESTIMATED_GAUSSIANS",
+            8500000,
+        ),
+        "max_anchor_radii2_sum": _preflight_float_limit_from_env(
+            "HGS_XR_PREFLIGHT_MAX_ANCHOR_RADII2_SUM",
+            0.0,
+        ),
+        "max_anchor_radii": _preflight_float_limit_from_env(
+            "HGS_XR_PREFLIGHT_MAX_ANCHOR_RADII",
+            0.0,
+        ),
+        "cooldown_ms": _preflight_guard_cooldown_seconds_from_env() * 1000.0,
+    }
+    return "enabled " + " ".join(
+        f"{key}={_format_preflight_value(value)}"
+        for key, value in values.items()
+        if value is not None
+    )
+
+
+def _fallback_rgb_for_camera(viewpoint_camera, background, cached_rgb=None):
+    height = int(viewpoint_camera.image_height)
+    width = int(viewpoint_camera.image_width)
+    if cached_rgb is not None and tuple(cached_rgb.shape[-2:]) == (height, width):
+        return cached_rgb
+    bg = torch.clamp(background.detach(), 0.0, 1.0)
+    if bg.ndim == 1:
+        bg = bg[:, None, None]
+    return bg[:3].expand(3, height, width).contiguous()
+
+
+def _render_stereo_cameras(left_cam, right_cam, gaussians, pipe, background, render_fn, profile_meter=None):
+    profiler = profile_meter if profile_meter is not None and profile_meter.enabled else None
+    if profiler is not None:
+        t0 = profiler.now()
+    left_pkg = render_fn(left_cam, gaussians, pipe, background)
+    left_rgb = torch.clamp(left_pkg["render"], 0.0, 1.0)
+    if profiler is not None:
+        profiler.sync_cuda()
+        elapsed_ms = profiler.elapsed_ms(t0)
+        profiler.record("left_render", elapsed_ms)
+        profiler.note_slow_render("left", elapsed_ms)
+
+    if profiler is not None:
+        t0 = profiler.now()
+    right_pkg = render_fn(right_cam, gaussians, pipe, background)
+    right_rgb = torch.clamp(right_pkg["render"], 0.0, 1.0)
+    if profiler is not None:
+        profiler.sync_cuda()
+        elapsed_ms = profiler.elapsed_ms(t0)
+        profiler.record("right_render", elapsed_ms)
+        profiler.note_slow_render("right", elapsed_ms)
+    return left_rgb, right_rgb
+
+
 def _render_stereo_frame(frame, config, gaussians, pipe, background, render_fn, profile_meter=None):
     profiler = profile_meter if profile_meter is not None and profile_meter.enabled else None
     if profiler is not None:
@@ -99,6 +407,9 @@ def _render_stereo_frame(frame, config, gaussians, pipe, background, render_fn, 
     right_cam = build_minicam_from_openxr_view(frame, "right", config)
     if profiler is not None:
         profiler.record("camera", profiler.elapsed_ms(t0))
+
+    if _preflight_log_enabled_from_env():
+        _log_preflight_frame(frame, left_cam, right_cam, gaussians, pipe)
 
     if profiler is not None:
         t0 = profiler.now()
@@ -276,9 +587,15 @@ def _run_openxr_stream_session(
     try:
         conn, addr = listener.accept()
         print(f"[openxr-stream] connected by {addr}")
+        print(f"[openxr-stream] preflight_guard={_preflight_guard_config_summary()}", flush=True)
         rendered_count = 0
         fps_meter = _StreamFpsMeter()
         profile_meter = _StreamProfileMeter(_profile_enabled_from_env())
+        skipped_count = 0
+        last_left_rgb = None
+        last_right_rgb = None
+        guard_cooldown_until = 0.0
+        last_guard_reason = ""
         slow_frame_log = None
         if profile_meter.enabled:
             print("[openxr-stream] profiling enabled via HGS_XR_PROFILE=1")
@@ -324,15 +641,55 @@ def _run_openxr_stream_session(
                 frame_id = int(payload.get("frame_id", rendered_count))
                 if profile_meter.enabled:
                     t_busy = profile_meter.now()
-                _, _, left_rgb, right_rgb = _render_stereo_frame(
-                    payload,
-                    config,
-                    gaussians,
-                    pipe,
-                    background,
-                    render_fn,
-                    profile_meter,
-                )
+                    t_camera = profile_meter.now()
+                left_cam = build_minicam_from_openxr_view(payload, "left", config)
+                right_cam = build_minicam_from_openxr_view(payload, "right", config)
+                if profile_meter.enabled:
+                    profile_meter.record("camera", profile_meter.elapsed_ms(t_camera))
+
+                preflight_stats = None
+                cooldown_now = profile_meter.now()
+                guard_cooldown_remaining = max(0.0, guard_cooldown_until - cooldown_now)
+                guard_in_cooldown = _preflight_guard_enabled_from_env() and guard_cooldown_remaining > 0.0
+                if guard_in_cooldown:
+                    skip_reason = (
+                        f"cooldown_remaining_ms={guard_cooldown_remaining * 1000.0:.1f}"
+                        + (f",last_reason={last_guard_reason}" if last_guard_reason else "")
+                    )
+                elif _preflight_log_enabled_from_env() or _preflight_guard_enabled_from_env():
+                    preflight_stats = _collect_preflight_frame_stats(left_cam, right_cam, gaussians, pipe)
+                    if _preflight_log_enabled_from_env():
+                        _log_preflight_stats(payload, preflight_stats)
+                    skip_reason = _preflight_guard_reason(preflight_stats or [])
+                    if skip_reason:
+                        last_guard_reason = skip_reason
+                        cooldown_seconds = _preflight_guard_cooldown_seconds_from_env()
+                        if cooldown_seconds > 0.0:
+                            guard_cooldown_until = profile_meter.now() + cooldown_seconds
+                else:
+                    skip_reason = ""
+                if skip_reason:
+                    skipped_count += 1
+                    left_rgb = _fallback_rgb_for_camera(left_cam, background, last_left_rgb)
+                    right_rgb = _fallback_rgb_for_camera(right_cam, background, last_right_rgb)
+                    action = "cooldown_reuse" if guard_in_cooldown else "reuse_or_background"
+                    print(
+                        f"[xr-guard] frame_id={frame_id} action={action} "
+                        f"skipped={skipped_count} reason={skip_reason}",
+                        flush=True,
+                    )
+                else:
+                    left_rgb, right_rgb = _render_stereo_cameras(
+                        left_cam,
+                        right_cam,
+                        gaussians,
+                        pipe,
+                        background,
+                        render_fn,
+                        profile_meter,
+                    )
+                    last_left_rgb = left_rgb.detach()
+                    last_right_rgb = right_rgb.detach()
                 slow_render_events = profile_meter.take_slow_render_events()
                 if slow_frame_log is not None and slow_render_events:
                     slow_frame_log.write(

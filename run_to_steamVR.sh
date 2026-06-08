@@ -5,12 +5,18 @@ conda activate horizon_gs_py_312_pt271_cu126
 # 性能分析
 # $env:HGS_XR_PROFILE=1
 # $env:HGS_XR_SLOW_RENDER_MS=150
+# $env:HGS_XR_PREFLIGHT_LOG=1
+# $env:HGS_XR_PREFLIGHT_LOG_EVERY=1
+# $env:HGS_XR_PREFLIGHT_GUARD=1
+# $env:HGS_XR_PREFLIGHT_MAX_PREFILTER_SELECTED=750000
+# $env:HGS_XR_PREFLIGHT_MAX_ESTIMATED_GAUSSIANS=7500000
+# $env:HGS_XR_PREFLIGHT_GUARD_COOLDOWN_MS=750
 
 
 python render.py `
   -m outputs/horizongs/real/road_subset/fine `
   --xr_mode openxr_stream `
-  --xr_config config/xr/openxr_road_anchor_frame100.yaml `
+  --xr_config config\xr\openxr_road_anchor_train_street_00055.yaml `
   --xr_match_swapchain_resolution_scale `
   --xr_socket_host 127.0.0.1 `
   --xr_socket_port 6110

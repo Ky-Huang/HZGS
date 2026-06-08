@@ -1013,6 +1013,9 @@ if __name__ == "__main__":
     parser.add_argument("--xr_socket_port", type=int, default=6110)
     parser.add_argument("--xr_max_frames", type=int, default=-1)
     parser.add_argument("--xr_match_swapchain_resolution_scale", action="store_true")
+    parser.add_argument("--xr_lod_anchor_budget", type=int, default=-1)
+    parser.add_argument("--xr_anchor_budget", type=int, default=-1)
+    parser.add_argument("--xr_max_anchor_distance", type=float, default=-1.0)
     parser.add_argument("--fix-lod", type=int, default=-1)
     args = parser.parse_args(sys.argv[1:])
     _apply_hybrid_render_car_preset(args, sys.argv[1:])
@@ -1106,6 +1109,9 @@ if __name__ == "__main__":
         pp.hybrid_mesh_env_ambient_strength = args.hybrid_mesh_env_ambient_strength
     if args.hybrid_verbose:
         pp.hybrid_verbose = True
+    pp.xr_lod_anchor_budget = args.xr_lod_anchor_budget
+    pp.xr_anchor_budget = args.xr_anchor_budget
+    pp.xr_max_anchor_distance = args.xr_max_anchor_distance
     pp.fix_lod = args.fix_lod if args.fix_lod >= 0 else getattr(pp, "fix_lod", -1)
     if len(args.target_view) > 0:
         TARGET_RENDER_IMAGE_PATHS = set(args.target_view)

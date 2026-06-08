@@ -56,6 +56,62 @@ def _count_true(mask):
     return int(mask.sum().item())
 
 
+def _get_optional_float(pipe, attr_name, env_name, default=-1.0):
+    value = getattr(pipe, attr_name, default)
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        value = env_value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _get_optional_int(pipe, attr_name, env_name, default=-1):
+    value = getattr(pipe, attr_name, default)
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        value = env_value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _limit_anchor_mask_by_distance(viewpoint_camera, pc, mask, max_distance):
+    if max_distance <= 0.0 or mask is None or mask.sum() == 0:
+        return mask
+    anchor = pc.get_anchor
+    dist = (anchor - viewpoint_camera.camera_center).norm(dim=1)
+    return torch.logical_and(mask, dist <= float(max_distance))
+
+
+def _limit_anchor_mask_by_budget(viewpoint_camera, pc, mask, budget):
+    if budget <= 0 or mask is None:
+        return mask
+    selected = int(mask.sum().item())
+    if selected <= int(budget):
+        return mask
+
+    idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
+    dist = (pc.get_anchor[idx] - viewpoint_camera.camera_center).norm(dim=1)
+    keep_pos = torch.topk(dist, k=int(budget), largest=False, sorted=False).indices
+    limited = torch.zeros_like(mask)
+    limited[idx[keep_pos]] = True
+    return limited
+
+
+def apply_runtime_anchor_limits(viewpoint_camera, pc, pipe, mask, *, allow_budget):
+    """Optional XR/runtime anchor throttle. Disabled unless attrs/env vars are set."""
+    max_distance = _get_optional_float(pipe, "xr_max_anchor_distance", "HGS_XR_MAX_ANCHOR_DISTANCE", -1.0)
+    mask = _limit_anchor_mask_by_distance(viewpoint_camera, pc, mask, max_distance)
+    budget_attr = "xr_anchor_budget" if allow_budget else "xr_lod_anchor_budget"
+    budget_env = "HGS_XR_ANCHOR_BUDGET" if allow_budget else "HGS_XR_LOD_ANCHOR_BUDGET"
+    budget = _get_optional_int(pipe, budget_attr, budget_env, -1)
+    mask = _limit_anchor_mask_by_budget(viewpoint_camera, pc, mask, budget)
+    return mask
+
+
 def _radii_stats(radii):
     visible = radii[radii > 0]
     if visible.numel() == 0:
@@ -67,7 +123,7 @@ def _radii_stats(radii):
     )
 
 
-def _maybe_log_slow_render(viewpoint_camera, pc, profile, visible_mask, selection_mask, radii):
+def _maybe_log_slow_render(viewpoint_camera, pc, pipe, profile, visible_mask, selection_mask, radii):
     if profile is None:
         return
     total_ms = sum(profile["stages_ms"].values())
@@ -89,6 +145,9 @@ def _maybe_log_slow_render(viewpoint_camera, pc, profile, visible_mask, selectio
         "radii_max": round(radii_max, 2),
         "radii_p95": round(radii_p95, 2),
         "resolution_scale": float(getattr(viewpoint_camera, "resolution_scale", -1.0)),
+        "xr_max_anchor_distance": _get_optional_float(pipe, "xr_max_anchor_distance", "HGS_XR_MAX_ANCHOR_DISTANCE", -1.0),
+        "xr_lod_anchor_budget": _get_optional_int(pipe, "xr_lod_anchor_budget", "HGS_XR_LOD_ANCHOR_BUDGET", -1),
+        "xr_anchor_budget": _get_optional_int(pipe, "xr_anchor_budget", "HGS_XR_ANCHOR_BUDGET", -1),
         "camera_center": _camera_center_list(viewpoint_camera),
         "gs_attr": getattr(pc, "gs_attr", ""),
         "render_mode": getattr(pc, "render_mode", ""),
@@ -118,12 +177,14 @@ def render(viewpoint_camera, pc, pipe, bg_color):
     else:
         t0 = time.perf_counter() if profile is not None else None
         pc.set_anchor_mask(viewpoint_camera.camera_center, viewpoint_camera.resolution_scale)
+        pc._anchor_mask = apply_runtime_anchor_limits(viewpoint_camera, pc, pipe, pc._anchor_mask, allow_budget=False)
         if profile is not None:
             profile["lod_mask"] = pc._anchor_mask
             _profile_stage(profile, "set_anchor_mask", t0)
 
         t0 = time.perf_counter() if profile is not None else None
         visible_mask = prefilter_voxel(viewpoint_camera, pc).squeeze() if pipe.add_prefilter else pc._anchor_mask
+        visible_mask = apply_runtime_anchor_limits(viewpoint_camera, pc, pipe, visible_mask, allow_budget=True)
         if profile is not None:
             _profile_stage(profile, "prefilter", t0)
 
@@ -220,7 +281,7 @@ def render(viewpoint_camera, pc, pipe, bg_color):
     }
     if profile is not None:
         return_dict["_render_profile"] = profile
-        _maybe_log_slow_render(viewpoint_camera, pc, profile, visible_mask, selection_mask, radii)
+        _maybe_log_slow_render(viewpoint_camera, pc, pipe, profile, visible_mask, selection_mask, radii)
     
     if pc.gs_attr == "2D":
         return_dict.update({
@@ -268,7 +329,9 @@ def render_motion_vectors(viewpoint_camera_a, viewpoint_camera_b, pc, pipe, bg_c
         xyz, color, opacity, scaling, rot, sh_degree, selection_mask = pc.generate_explicit_gaussians(visible_mask)
     else:
         pc.set_anchor_mask(viewpoint_camera_a.camera_center, viewpoint_camera_a.resolution_scale)
+        pc._anchor_mask = apply_runtime_anchor_limits(viewpoint_camera_a, pc, pipe, pc._anchor_mask, allow_budget=False)
         visible_mask = prefilter_voxel(viewpoint_camera_a, pc).squeeze() if pipe.add_prefilter else pc._anchor_mask
+        visible_mask = apply_runtime_anchor_limits(viewpoint_camera_a, pc, pipe, visible_mask, allow_budget=True)
         xyz, offset, color, opacity, scaling, rot, sh_degree, selection_mask = pc.generate_neural_gaussians(viewpoint_camera_a, visible_mask)
 
     radii_a, means2d_a = _project_gaussians_to_2d(xyz, rot, scaling, viewpoint_camera_a, pc.gs_attr)

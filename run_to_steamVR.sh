@@ -16,15 +16,18 @@ conda activate horizon_gs_py_312_pt271_cu126
 python render.py `
   -m outputs/horizongs/real/road_subset/fine `
   --xr_mode openxr_stream `
-  --xr_config config\xr\openxr_road_anchor_train_street_00055.yaml `
+  --xr_config config/xr/openxr_road_anchor_train_street_00055.yaml `
   --xr_match_swapchain_resolution_scale `
   --xr_socket_host 127.0.0.1 `
   --xr_socket_port 6110
+  --xr_anchor_budget 350000 `
+  --xr_max_anchor_distance 35 `
+  # --xr_lod_anchor_budget 1000000 `
 
   # 启动 SteamVR/OpenXR 投放端
   cd D:\Code\horizonGS
 
-# 构建 cmake --build build\openxr_cuda_demo --config Release
+# 构建 cmake --build build\openxr_cuda_demo --config Release  
 
 .\build\openxr_cuda_demo\Release\openxr_cuda_demo.exe `
   --frames -1 `

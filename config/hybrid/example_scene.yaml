@@ -1,8 +1,8 @@
 skybox_path: ""
-# /ssd1/hk/projects/HorizonGS/sky0.hdr
+# /ssd1/hk/projects/HZGS/sky0.hdr
 meshes:
   - name: car_main
-    path: /ssd1/hk/projects/HorizonGS/Car.obj
+    path: /ssd1/hk/projects/HZGS/Car.obj
     center_world: [-14.914, 0.3, 17.358]
     rotation_deg: [90.0, 0.0, 45.0]
     scale: 1.0
@@ -11,7 +11,7 @@ meshes:
     enabled: true
 
   # - name: car_offset
-  #   path: /ssd1/hk/projects/HorizonGS/Car.obj
+  #   path: /ssd1/hk/projects/HZGS/Car.obj
   #   center_world: [3.0, 0.0, 0.0]
   #   rotation_deg: [0.0, 45.0, 0.0]
   #   scale: 1.0

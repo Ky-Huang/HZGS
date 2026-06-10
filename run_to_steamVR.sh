@@ -1,6 +1,6 @@
 
 # 启动 HorizonGS 图像流服务
-cd D:\Code\horizonGS
+cd D:\Code\HZGS
 conda activate horizon_gs_py_312_pt271_cu126
 # 性能分析
 # $env:HGS_XR_PROFILE=1
@@ -20,14 +20,16 @@ python render.py `
   --xr_match_swapchain_resolution_scale `
   --xr_socket_host 127.0.0.1 `
   --xr_socket_port 6110 `
-  --xr_anchor_budget 600000 `
+  --xr_anchor_budget 600000
   # --xr_max_anchor_distance 35 `
+  # --acceptance `
+  # --outputspath acceptance/xr `
   # --xr_lod_anchor_budget 1000000 `
 
   # 目前猜测是由于在视锥内部有大量的未剪枝点，导致后方视角的卡顿（限制视锥长度并不能减缓卡顿，也即说明多余的anchor点位于视角近处）
 
   # 启动 SteamVR/OpenXR 投放端
-  cd D:\Code\horizonGS
+  cd D:\Code\HZGS
 
 # 构建 cmake --build build\openxr_cuda_demo --config Release  
 

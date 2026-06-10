@@ -51,6 +51,12 @@ HYBRID_RENDER_CAR_BASE_PRESET = {
     "hybrid_verbose": True,
 }
 
+MIXED_RENDER_PRESET = {
+    "enable_hybrid_render": True,
+    "hybrid_mesh_backend": "nvdiffrast",
+    "hybrid_scene_config": "config/hybrid/example_scene.yaml",
+}
+
 HYBRID_RENDER_CAR_ORBIT_PRESET = {
     "camera_path_mode": "orbit",
     "camera_path_reference_view": "X_009_00307",
@@ -66,11 +72,22 @@ HYBRID_RENDER_CAR_ORBIT_PRESET = {
     "orbit_sweep_deg": 360.0,
 }
 
+ACCEPTANCE_ORBIT_RENDER_CAR_PRESET = {
+    **HYBRID_RENDER_CAR_ORBIT_PRESET,
+    "camera_path_frames": HYBRID_RENDER_CAR_ORBIT_PRESET["camera_path_frames"] // 3,
+}
+
 HYBRID_RENDER_CAR_BASE_FLAGS = {
     "enable_hybrid_render": "--enable_hybrid_render",
     "hybrid_mesh_backend": "--hybrid_mesh_backend",
     "hybrid_scene_config": "--hybrid_scene_config",
     "hybrid_verbose": "--hybrid_verbose",
+}
+
+MIXED_RENDER_FLAGS = {
+    "enable_hybrid_render": "--enable_hybrid_render",
+    "hybrid_mesh_backend": "--hybrid_mesh_backend",
+    "hybrid_scene_config": "--hybrid_scene_config",
 }
 
 HYBRID_RENDER_CAR_ORBIT_FLAGS = {
@@ -97,6 +114,10 @@ def _apply_cli_preset(args, argv, preset_values, preset_flags):
         setattr(args, attr, value)
 
 
+def _argv_has_option(argv, option):
+    return any(arg == option or arg.startswith(f"{option}=") for arg in argv)
+
+
 def _apply_hybrid_render_car_preset(args, argv):
     if not getattr(args, "hybrid_render_car", False):
         return
@@ -112,6 +133,17 @@ def _apply_hybrid_render_car_preset(args, argv):
         return
 
     _apply_cli_preset(args, argv, HYBRID_RENDER_CAR_ORBIT_PRESET, HYBRID_RENDER_CAR_ORBIT_FLAGS)
+
+
+def _apply_acceptance_orbit_render_car_preset(args, argv):
+    if not (getattr(args, "acceptance", False) and getattr(args, "orbit_render_car", False)):
+        return
+
+    camera_path_mode = getattr(args, "camera_path_mode", "")
+    if camera_path_mode and camera_path_mode != "orbit":
+        return
+
+    _apply_cli_preset(args, argv, ACCEPTANCE_ORBIT_RENDER_CAR_PRESET, HYBRID_RENDER_CAR_ORBIT_FLAGS)
 
 
 def _flow_uv_to_color(flow_uv, support=None, clip_percentile=99.0):
@@ -330,6 +362,7 @@ def _save_hybrid_buffers(render_pkg, alpha_mask, hybrid_buffer_path, idx):
 
 TARGET_RENDER_IMAGE_PATHS = set()
 TARGET_RENDER_MAX_VIEWS = None
+RENDER_OUTPUT_PATH = ""
 
 
 def _load_yaml_if_exists(path):
@@ -401,12 +434,26 @@ def _save_mesh_instances(render_pkg, output_dir):
 
 
 def _resolve_render_output_root(model_path, fixed_lod=-1):
+    output_root = RENDER_OUTPUT_PATH or model_path
     if fixed_lod is None:
-        return model_path
+        return output_root
     fixed_lod = int(fixed_lod)
     if fixed_lod < 0:
-        return model_path
-    return os.path.join(model_path, f"fix-lod-{fixed_lod}")
+        return output_root
+    return os.path.join(output_root, f"fix-lod-{fixed_lod}")
+
+
+def _fps_and_1pct_low(frame_times, warmup_frames=5):
+    valid_times = frame_times[warmup_frames:]
+    total_time = sum(valid_times)
+    fps = len(valid_times) / total_time if total_time > 0 else 0.0
+    if not valid_times:
+        return fps, 0.0
+    low_count = max(1, (len(valid_times) + 99) // 100)
+    low_times = sorted(valid_times, reverse=True)[:low_count]
+    low_time = sum(low_times)
+    low_fps = len(low_times) / low_time if low_time > 0 else 0.0
+    return fps, low_fps
 
 
 def _parse_camera_path_index(index_value, frame_value, field_name):
@@ -588,6 +635,7 @@ def _render_camera_path(scene, dataset, gaussians, pipe, render_motion_vectors, 
     return True
 
 def render_set(model_path, name, iteration, views, gaussians, pipe, background, add_aerial, add_street, render_only=False, render_motion_vectors=False, write_per_view_count=False, show_fps=False, render_point_cloud=False):
+    display_name = name or "acceptance"
     vis_normal = False
     vis_depth = False
     if gaussians.gs_attr == "2D" and not render_only:
@@ -601,7 +649,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipe, background, 
     views = _filter_views_by_targets(views, TARGET_RENDER_IMAGE_PATHS)
     if TARGET_RENDER_MAX_VIEWS is not None:
         views = views[:TARGET_RENDER_MAX_VIEWS]
-    print(f"[{name}] selected views: {len(views)}")
+    print(f"[{display_name}] selected views: {len(views)}")
         
     if add_aerial:
         aerial_render_path = os.path.join(output_root, name, "ours_{}".format(iteration), "aerial", "renders")
@@ -772,6 +820,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipe, background, 
     aerial_per_view_dict = {}
     aerial_point_cloud_dict = {}
     aerial_views = [view for view in views if view.image_type=="aerial"]
+    if RENDER_OUTPUT_PATH:
+        aerial_views = aerial_views[:120]
     for idx, view in enumerate(tqdm(aerial_views, desc="Aerial rendering progress")):
         if show_fps:
             torch.cuda.synchronize()
@@ -854,21 +904,16 @@ def render_set(model_path, name, iteration, views, gaussians, pipe, background, 
         os.chmod(aerial_point_cloud_count_path, 0o666)
 
     if show_fps:
-        aerial_valid_count = max(len(aerial_t_list) - 5, 0)
-        street_valid_count = max(len(street_t_list) - 5, 0)
-        aerial_time = sum(aerial_t_list[5:])
-        street_time = sum(street_t_list[5:])
-
-        aerial_fps = aerial_valid_count / aerial_time if aerial_time > 0 else 0.0
-        street_fps = street_valid_count / street_time if street_time > 0 else 0.0
-
-        total_valid_count = aerial_valid_count + street_valid_count
-        total_time = aerial_time + street_time
-        total_fps = total_valid_count / total_time if total_time > 0 else 0.0
+        aerial_fps, aerial_1pct_low = _fps_and_1pct_low(aerial_t_list)
+        street_fps, street_1pct_low = _fps_and_1pct_low(street_t_list)
+        total_fps, total_1pct_low = _fps_and_1pct_low(street_t_list[5:] + aerial_t_list[5:], warmup_frames=0)
 
         print("Aerial帧率: {}".format(aerial_fps))
+        print("Aerial 1% low帧率: {}".format(aerial_1pct_low))
         print("Street帧率: {}".format(street_fps))
+        print("Street 1% low帧率: {}".format(street_1pct_low))
         print("总帧率: {}".format(total_fps))
+        print("总1% low帧率: {}".format(total_1pct_low))
 
     
 def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, ape_code, explicit, render_motion_vectors=False, write_per_view_count=False, show_fps=False, render_point_cloud=False):
@@ -919,6 +964,7 @@ def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, ape_code, 
                 ),
                 xr_stream_upsample_scale=float(getattr(dataset, "xr_stream_upsample_scale", 1.0)),
                 xr_stream_upsample_mode=getattr(dataset, "xr_stream_upsample_mode", "bilinear"),
+                xr_pose_only_log=bool(getattr(dataset, "xr_pose_only_log", False)),
             )
             return
 
@@ -926,7 +972,7 @@ def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, ape_code, 
             return
         
         if not skip_train:
-            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, dataset.add_aerial, dataset.add_street, render_only=getattr(dataset, "render_only", False), render_motion_vectors=render_motion_vectors, write_per_view_count=write_per_view_count, show_fps=show_fps, render_point_cloud=render_point_cloud)
+            render_set(dataset.model_path, "" if RENDER_OUTPUT_PATH else "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, dataset.add_aerial, dataset.add_street, render_only=getattr(dataset, "render_only", False), render_motion_vectors=render_motion_vectors, write_per_view_count=write_per_view_count, show_fps=show_fps, render_point_cloud=render_point_cloud)
 
         if not skip_test:
             test_views = scene.getTestCameras()
@@ -948,6 +994,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", default=0, type=int)
     parser.add_argument("--lazy_load_images", action="store_true")
     parser.add_argument("--render_only", action="store_true")
+    parser.add_argument("--acceptance", action="store_true")
+    parser.add_argument("--outputspath", "---outputspath", type=str, default="")
+    parser.add_argument("--mixed_render", action="store_true")
+    parser.add_argument("--orbit_render_car", action="store_true")
     parser.add_argument("--enable_hybrid_render", action="store_true")
     parser.add_argument(
         "--hybrid_render_car",
@@ -1023,6 +1073,21 @@ if __name__ == "__main__":
     parser.add_argument("--fix-lod", type=int, default=-1)
     args = parser.parse_args(sys.argv[1:])
     _apply_hybrid_render_car_preset(args, sys.argv[1:])
+    args.outputspath = str(args.outputspath or "").strip()
+    if args.acceptance and not args.outputspath:
+        parser.error("--acceptance requires --outputspath OUTPUT_PATH")
+    if args.outputspath and not args.acceptance:
+        parser.error("--outputspath requires --acceptance")
+    if args.orbit_render_car and not args.acceptance:
+        parser.error("--orbit_render_car requires --acceptance")
+    if args.acceptance:
+        RENDER_OUTPUT_PATH = args.outputspath
+        args.skip_test = True
+        if args.mixed_render:
+            _apply_cli_preset(args, sys.argv[1:], MIXED_RENDER_PRESET, MIXED_RENDER_FLAGS)
+        _apply_acceptance_orbit_render_car_preset(args, sys.argv[1:])
+    if args.acceptance and args.xr_mode.strip() and not _argv_has_option(sys.argv[1:], "--xr_anchor_budget"):
+        args.xr_anchor_budget = 600000
 
     if args.num_workers > 0:
         os.environ["HGS_NUM_WORKERS"] = str(args.num_workers)
@@ -1058,6 +1123,7 @@ if __name__ == "__main__":
         lp.orbit_start_azimuth_deg = args.orbit_start_azimuth_deg
         lp.orbit_sweep_deg = args.orbit_sweep_deg
         lp.xr_mode = args.xr_mode.strip().lower()
+        lp.xr_pose_only_log = bool(args.acceptance and lp.xr_mode)
         lp.xr_input = args.xr_input
         lp.xr_config = args.xr_config
         lp.xr_output_name = args.xr_output_name
@@ -1127,7 +1193,11 @@ if __name__ == "__main__":
         lp.target_views = [args.camera_path_reference_view]
     if args.max_views > 0:
         TARGET_RENDER_MAX_VIEWS = args.max_views
-    print("Rendering " + args.model_path)
+    xr_acceptance_pose_only = bool(args.acceptance and args.xr_mode.strip())
+    if not xr_acceptance_pose_only:
+        print("Rendering " + args.model_path)
+    if args.acceptance and not xr_acceptance_pose_only:
+        print(f"[render] acceptance output root: {RENDER_OUTPUT_PATH}")
 
     # Initialize system state (RNG)
     safe_state(args.quiet)

@@ -1,4 +1,6 @@
 {
+//       --xr_anchor_budget 350000 `
+//   --xr_max_anchor_distance 35 `
     // 使用 IntelliSense 了解相关属性。 
     // 悬停以查看现有属性的描述。
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
@@ -75,6 +77,9 @@
                 // "4",
                 // "--lazy_load_images",
                 "--render_only",
+                "--acceptance",
+                "--outputspath",
+                "acceptance",
                 // "--render_point_cloud",
 
                 // "--enable_hybrid_render",
@@ -223,7 +228,7 @@
                 "--hybrid_mesh_backend",
                 "nvdiffrast",
                 "--hybrid_mesh_path",
-                "/ssd1/hk/projects/HorizonGS/Car.obj",
+                "/ssd1/hk/projects/HZGS/Car.obj",
                 "--hybrid_save_buffers",
                 "--hybrid_verbose",
                 "--target_view",
@@ -254,7 +259,7 @@
                 "--hybrid_mesh_backend",
                 "nvdiffrast",
                 "--hybrid_mesh_path",
-                "/ssd1/hk/projects/HorizonGS/Car.obj",
+                "/ssd1/hk/projects/HZGS/Car.obj",
                 "--hybrid_auto_place_mesh",
                 "--hybrid_mesh_scale",
                 "1.0",
@@ -388,7 +393,7 @@
                 "--hybrid_mesh_backend",
                 "nvdiffrast",
                 "--hybrid_mesh_path",
-                "/ssd1/hk/projects/HorizonGS/Car.obj",
+                "/ssd1/hk/projects/HZGS/Car.obj",
                 "--hybrid_auto_place_mesh",
                 "--hybrid_debug_placement",
                 "scene_centered",
@@ -434,7 +439,7 @@
                 "--hybrid_debug_placement",
                 "scene_centered",
                 "--hybrid_skybox_path",
-                "/ssd1/hk/projects/HorizonGS/sky0.hdr",
+                "/ssd1/hk/projects/HZGS/sky0.hdr",
                 "--hybrid_save_buffers",
                 "--hybrid_verbose",
                 "--target_view",

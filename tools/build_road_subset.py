@@ -127,7 +127,7 @@ def main():
     parser.add_argument("--src_dataset", required=True)
     parser.add_argument("--subset_sparse_dir", required=True)
     parser.add_argument("--dst_dataset", required=True)
-    parser.add_argument("--ref_config_dir", default="/ssd1/hk/projects/HorizonGS/config/ours/urbangs/real/road")
+    parser.add_argument("--ref_config_dir", default="/ssd1/hk/projects/HZGS/config/ours/urbangs/real/road")
     parser.add_argument("--out_config_dir", required=True)
     parser.add_argument("--config_source_path", default="")
     args = parser.parse_args()

@@ -32,12 +32,12 @@ def main():
     parser.add_argument(
         "--dir1",
         type=Path,
-        default=Path("/ssd1/hk/projects/HorizonGS/outputs/horizongs_2d/real/road/fine/test_unfix"),
+        default=Path("/ssd1/hk/projects/HZGS/outputs/horizongs_2d/real/road/fine/test_unfix"),
     )
     parser.add_argument(
         "--dir2",
         type=Path,
-        default=Path("/ssd1/hk/projects/HorizonGS/outputs/horizongs_2d/real/road/fine/test_fix"),
+        default=Path("/ssd1/hk/projects/HZGS/outputs/horizongs_2d/real/road/fine/test_fix"),
     )
     parser.add_argument("--identical-psnr", type=float, default=100.0)
     parser.add_argument("--print-each", action="store_true")

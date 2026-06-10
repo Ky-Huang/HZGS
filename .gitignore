@@ -26,3 +26,4 @@ environment-conda-history.yml
 environment.yml
 requirements-pip-raw.txt
 .conda_envs
+acceptance

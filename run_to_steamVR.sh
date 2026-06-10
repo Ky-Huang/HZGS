@@ -1,6 +1,6 @@
 
 # 启动 HorizonGS 图像流服务
-cd D:\Code\horizonGS
+cd D:\Code\HZGS
 conda activate horizon_gs_py_312_pt271_cu126
 # 性能分析
 # $env:HGS_XR_PROFILE=1
@@ -22,10 +22,11 @@ python render.py `
   --xr_socket_port 6110
   --xr_anchor_budget 350000 `
   --xr_max_anchor_distance 35 `
+  --acceptance `
   # --xr_lod_anchor_budget 1000000 `
 
   # 启动 SteamVR/OpenXR 投放端
-  cd D:\Code\horizonGS
+  cd D:\Code\HZGS
 
 # 构建 cmake --build build\openxr_cuda_demo --config Release  
 
@@ -35,4 +36,4 @@ python render.py `
   --pose-socket-host 127.0.0.1 `
   --pose-socket-port 6110 `
   --pose-socket-retry-seconds 60 `
-  --swapchain-scale 0.25
+  --swapchain-scale 0.5

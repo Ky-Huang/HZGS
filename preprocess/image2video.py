@@ -22,7 +22,7 @@ def main():
     parser.add_argument(
         "--input_dir",
         type=str,
-        default="/ssd1/hk/projects/HorizonGS/outputs/horizongs_2d/real/road/fine/train/ours_40000/street/renders",
+        default="/ssd1/hk/projects/HZGS/outputs/horizongs_2d/real/road/fine/train/ours_40000/street/renders",
     )
     parser.add_argument("--output", type=str, default="")
     parser.add_argument("--fps", type=float, default=30.0)

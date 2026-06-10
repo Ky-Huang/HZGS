@@ -91,6 +91,94 @@ def _match_resolution_scale_to_swapchain(config, frame, enabled):
     return abs(previous - matched_resolution_scale) > 1e-6
 
 
+def _format_log_tuple(values, precision=3):
+    if values is None:
+        return "unavailable"
+    return "(" + ",".join(f"{float(value):.{precision}f}" for value in values) + ")"
+
+
+def _safe_float_list(values, expected_len):
+    try:
+        if values is None or len(values) != expected_len:
+            return None
+        return [float(value) for value in values]
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_payload_eye_pose(frame, eye):
+    views = frame.get("views") if isinstance(frame, dict) else None
+    if isinstance(views, dict):
+        view = views.get(eye)
+    elif isinstance(views, list):
+        view = next(
+            (item for item in views if isinstance(item, dict) and str(item.get("eye", "")).lower() == eye),
+            None,
+        )
+    else:
+        view = None
+    if not isinstance(view, dict):
+        return None
+    pose = view.get("pose")
+    return pose if isinstance(pose, dict) else None
+
+
+def _average_vectors(vectors):
+    valid = [np.asarray(value, dtype=np.float32) for value in vectors if value is not None]
+    if not valid:
+        return None
+    return np.mean(np.stack(valid, axis=0), axis=0).tolist()
+
+
+def _camera_center_for_log(camera):
+    if camera is None:
+        return None
+    try:
+        return [float(value) for value in camera.camera_center.detach().cpu().tolist()]
+    except Exception:
+        return None
+
+
+def _format_xr_pose_log_fields(frame, left_cam=None, right_cam=None):
+    left_pose = _get_payload_eye_pose(frame, "left")
+    right_pose = _get_payload_eye_pose(frame, "right")
+
+    left_tracking_pos = _safe_float_list(left_pose.get("position") if left_pose else None, 3)
+    right_tracking_pos = _safe_float_list(right_pose.get("position") if right_pose else None, 3)
+    tracking_pos = _average_vectors([left_tracking_pos, right_tracking_pos])
+
+    orientation = _safe_float_list(left_pose.get("orientation_xyzw") if left_pose else None, 4)
+    if orientation is None:
+        orientation = _safe_float_list(right_pose.get("orientation_xyzw") if right_pose else None, 4)
+
+    left_scene_pos = _camera_center_for_log(left_cam)
+    right_scene_pos = _camera_center_for_log(right_cam)
+    scene_pos = _average_vectors([left_scene_pos, right_scene_pos])
+
+    scene_eye_separation = None
+    if left_scene_pos is not None and right_scene_pos is not None:
+        scene_eye_separation = float(
+            np.linalg.norm(np.asarray(left_scene_pos, dtype=np.float32) - np.asarray(right_scene_pos, dtype=np.float32))
+        )
+
+    parts = []
+    if tracking_pos is not None:
+        parts.append(f"hmd_tracking_pos={_format_log_tuple(tracking_pos, precision=3)}")
+    if orientation is not None:
+        parts.append(f"hmd_quat_xyzw={_format_log_tuple(orientation, precision=4)}")
+    if scene_pos is not None:
+        parts.append(f"current_scene_pos={_format_log_tuple(scene_pos, precision=3)}")
+    if scene_eye_separation is not None:
+        parts.append(f"scene_eye_separation_m={scene_eye_separation:.3f}")
+    return " ".join(parts)
+
+
+def _log_xr_pose_only(frame_id, frame, left_cam=None, right_cam=None):
+    pose_summary = _format_xr_pose_log_fields(frame, left_cam, right_cam)
+    if pose_summary:
+        print(f"[xr-pose] frame_id={frame_id} {pose_summary}", flush=True)
+
+
 def _preflight_log_enabled_from_env():
     return os.environ.get("HGS_XR_PREFLIGHT_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -575,6 +663,7 @@ def _run_openxr_stream_session(
     xr_socket_port,
     xr_max_frames,
     xr_match_swapchain_resolution_scale,
+    xr_pose_only_log=False,
 ):
     config = load_xr_session_config(xr_config_path)
     reported_matched_resolution_scale = False
@@ -583,14 +672,16 @@ def _run_openxr_stream_session(
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((xr_socket_host, int(xr_socket_port)))
     listener.listen(1)
-    print(f"[openxr-stream] waiting for client on {xr_socket_host}:{xr_socket_port}")
+    if not xr_pose_only_log:
+        print(f"[openxr-stream] waiting for client on {xr_socket_host}:{xr_socket_port}")
     try:
         conn, addr = listener.accept()
-        print(f"[openxr-stream] connected by {addr}")
-        print(f"[openxr-stream] preflight_guard={_preflight_guard_config_summary()}", flush=True)
+        if not xr_pose_only_log:
+            print(f"[openxr-stream] connected by {addr}")
+            print(f"[openxr-stream] preflight_guard={_preflight_guard_config_summary()}", flush=True)
         rendered_count = 0
         fps_meter = _StreamFpsMeter()
-        profile_meter = _StreamProfileMeter(_profile_enabled_from_env())
+        profile_meter = _StreamProfileMeter(_profile_enabled_from_env() and not xr_pose_only_log)
         skipped_count = 0
         last_left_rgb = None
         last_right_rgb = None
@@ -622,20 +713,22 @@ def _run_openxr_stream_session(
                     break
                 if _match_resolution_scale_to_swapchain(config, payload, xr_match_swapchain_resolution_scale):
                     if not reported_matched_resolution_scale:
-                        print(
-                            "[openxr-stream] matched resolution_scale to "
-                            f"swapchain_scale={float(payload['swapchain_scale']):.3f}: "
-                            f"resolution_scale={float(config['resolution_scale']):.3f}",
-                            flush=True,
-                        )
+                        if not xr_pose_only_log:
+                            print(
+                                "[openxr-stream] matched resolution_scale to "
+                                f"swapchain_scale={float(payload['swapchain_scale']):.3f}: "
+                                f"resolution_scale={float(config['resolution_scale']):.3f}",
+                                flush=True,
+                            )
                         reported_matched_resolution_scale = True
                 elif xr_match_swapchain_resolution_scale and "swapchain_scale" not in payload:
                     if not reported_missing_swapchain_scale:
-                        print(
-                            "[openxr-stream] --xr_match_swapchain_resolution_scale is enabled, "
-                            "but the OpenXR payload has no swapchain_scale. Rebuild openxr_cuda_demo.",
-                            flush=True,
-                        )
+                        if not xr_pose_only_log:
+                            print(
+                                "[openxr-stream] --xr_match_swapchain_resolution_scale is enabled, "
+                                "but the OpenXR payload has no swapchain_scale. Rebuild openxr_cuda_demo.",
+                                flush=True,
+                            )
                         reported_missing_swapchain_scale = True
 
                 frame_id = int(payload.get("frame_id", rendered_count))
@@ -658,7 +751,7 @@ def _run_openxr_stream_session(
                     )
                 elif _preflight_log_enabled_from_env() or _preflight_guard_enabled_from_env():
                     preflight_stats = _collect_preflight_frame_stats(left_cam, right_cam, gaussians, pipe)
-                    if _preflight_log_enabled_from_env():
+                    if _preflight_log_enabled_from_env() and not xr_pose_only_log:
                         _log_preflight_stats(payload, preflight_stats)
                     skip_reason = _preflight_guard_reason(preflight_stats or [])
                     if skip_reason:
@@ -673,11 +766,12 @@ def _run_openxr_stream_session(
                     left_rgb = _fallback_rgb_for_camera(left_cam, background, last_left_rgb)
                     right_rgb = _fallback_rgb_for_camera(right_cam, background, last_right_rgb)
                     action = "cooldown_reuse" if guard_in_cooldown else "reuse_or_background"
-                    print(
-                        f"[xr-guard] frame_id={frame_id} action={action} "
-                        f"skipped={skipped_count} reason={skip_reason}",
-                        flush=True,
-                    )
+                    if not xr_pose_only_log:
+                        print(
+                            f"[xr-guard] frame_id={frame_id} action={action} "
+                            f"skipped={skipped_count} reason={skip_reason}",
+                            flush=True,
+                        )
                 else:
                     left_rgb, right_rgb = _render_stereo_cameras(
                         left_cam,
@@ -729,28 +823,34 @@ def _run_openxr_stream_session(
                 rendered_count += 1
                 now = fps_meter.mark_frame_sent()
                 if fps_meter.should_log(now):
-                    profile_summary = profile_meter.summary()
-                    profile_suffix = f" {profile_summary}" if profile_summary else ""
-                    print(
-                        f"[openxr-stream] fps={fps_meter.current_fps:.1f} "
-                        f"avg={fps_meter.average_fps(now):.1f} sent={rendered_count} "
-                        f"last_frame={frame_id} ({left_width}x{left_height})"
-                        f"{profile_suffix}",
-                        flush=True,
-                    )
+                    if xr_pose_only_log:
+                        _log_xr_pose_only(frame_id, payload, left_cam, right_cam)
+                    else:
+                        profile_summary = profile_meter.summary()
+                        profile_suffix = f" {profile_summary}" if profile_summary else ""
+                        pose_summary = _format_xr_pose_log_fields(payload, left_cam, right_cam)
+                        pose_suffix = f" {pose_summary}" if pose_summary else ""
+                        print(
+                            f"[openxr-stream] fps={fps_meter.current_fps:.1f} "
+                            f"avg={fps_meter.average_fps(now):.1f} sent={rendered_count} "
+                            f"last_frame={frame_id} ({left_width}x{left_height})"
+                            f"{pose_suffix}{profile_suffix}",
+                            flush=True,
+                        )
                     profile_meter.reset_interval()
     finally:
         if "slow_frame_log" in locals() and slow_frame_log is not None:
             slow_frame_log.close()
         listener.close()
 
-    if "fps_meter" in locals() and fps_meter.total_frames > 0:
-        print(
-            f"[openxr-stream] session ended, sent={fps_meter.total_frames} "
-            f"avg_fps={fps_meter.average_fps():.1f}"
-        )
-    else:
-        print("[openxr-stream] session ended")
+    if not xr_pose_only_log:
+        if "fps_meter" in locals() and fps_meter.total_frames > 0:
+            print(
+                f"[openxr-stream] session ended, sent={fps_meter.total_frames} "
+                f"avg_fps={fps_meter.average_fps():.1f}"
+            )
+        else:
+            print("[openxr-stream] session ended")
     return True
 
 
@@ -787,6 +887,7 @@ def run_openxr_render_session(
     xr_socket_port=6110,
     xr_max_frames=-1,
     xr_match_swapchain_resolution_scale=False,
+    xr_pose_only_log=False,
 ):
     if xr_mode == "openxr_stream":
         return _run_openxr_stream_session(
@@ -800,6 +901,7 @@ def run_openxr_render_session(
             xr_socket_port=xr_socket_port,
             xr_max_frames=xr_max_frames,
             xr_match_swapchain_resolution_scale=xr_match_swapchain_resolution_scale,
+            xr_pose_only_log=xr_pose_only_log,
         )
 
     config = load_xr_session_config(xr_config_path)
@@ -818,7 +920,8 @@ def run_openxr_render_session(
     frame_records = []
     iterator = _iter_frames(xr_mode, xr_input, xr_socket_host, xr_socket_port)
     total = None if xr_mode == "openxr_socket" else max(int(xr_max_frames), 0) if xr_max_frames > 0 else None
-    progress = tqdm(iterator, total=total, desc="OpenXR rendering")
+    progress = tqdm(iterator, total=total, desc="OpenXR rendering", disable=xr_pose_only_log)
+    pose_log_meter = _StreamFpsMeter()
     with open(raw_frames_path, "w", encoding="utf-8") as raw_frame_log:
         for frame_idx, frame in enumerate(progress):
             if xr_max_frames > 0 and frame_idx >= xr_max_frames:
@@ -828,20 +931,22 @@ def run_openxr_render_session(
             raw_frame_log.flush()
             if _match_resolution_scale_to_swapchain(config, frame, xr_match_swapchain_resolution_scale):
                 if not reported_matched_resolution_scale:
-                    print(
-                        "[openxr] matched resolution_scale to "
-                        f"swapchain_scale={float(frame['swapchain_scale']):.3f}: "
-                        f"resolution_scale={float(config['resolution_scale']):.3f}",
-                        flush=True,
-                    )
+                    if not xr_pose_only_log:
+                        print(
+                            "[openxr] matched resolution_scale to "
+                            f"swapchain_scale={float(frame['swapchain_scale']):.3f}: "
+                            f"resolution_scale={float(config['resolution_scale']):.3f}",
+                            flush=True,
+                        )
                     reported_matched_resolution_scale = True
             elif xr_match_swapchain_resolution_scale and "swapchain_scale" not in frame:
                 if not reported_missing_swapchain_scale:
-                    print(
-                        "[openxr] --xr_match_swapchain_resolution_scale is enabled, "
-                        "but the XR frame has no swapchain_scale.",
-                        flush=True,
-                    )
+                    if not xr_pose_only_log:
+                        print(
+                            "[openxr] --xr_match_swapchain_resolution_scale is enabled, "
+                            "but the XR frame has no swapchain_scale.",
+                            flush=True,
+                        )
                     reported_missing_swapchain_scale = True
 
             frame_id = int(frame.get("frame_id", frame_idx))
@@ -853,6 +958,10 @@ def run_openxr_render_session(
                 background,
                 render_fn,
             )
+            if xr_pose_only_log:
+                now = pose_log_meter.mark_frame_sent()
+                if pose_log_meter.should_log(now):
+                    _log_xr_pose_only(frame_id, frame, left_cam, right_cam)
 
             left_path = os.path.join(left_dir, f"{frame_id:05d}.png")
             right_path = os.path.join(right_dir, f"{frame_id:05d}.png")

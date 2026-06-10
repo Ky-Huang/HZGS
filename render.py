@@ -917,6 +917,8 @@ def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, ape_code, 
                 xr_match_swapchain_resolution_scale=bool(
                     getattr(dataset, "xr_match_swapchain_resolution_scale", False)
                 ),
+                xr_stream_upsample_scale=float(getattr(dataset, "xr_stream_upsample_scale", 1.0)),
+                xr_stream_upsample_mode=getattr(dataset, "xr_stream_upsample_mode", "bilinear"),
             )
             return
 
@@ -1013,6 +1015,8 @@ if __name__ == "__main__":
     parser.add_argument("--xr_socket_port", type=int, default=6110)
     parser.add_argument("--xr_max_frames", type=int, default=-1)
     parser.add_argument("--xr_match_swapchain_resolution_scale", action="store_true")
+    parser.add_argument("--xr_stream_upsample_scale", type=float, default=1.0)
+    parser.add_argument("--xr_stream_upsample_mode", type=str, default="bilinear")
     parser.add_argument("--xr_lod_anchor_budget", type=int, default=-1)
     parser.add_argument("--xr_anchor_budget", type=int, default=-1)
     parser.add_argument("--xr_max_anchor_distance", type=float, default=-1.0)
@@ -1064,6 +1068,8 @@ if __name__ == "__main__":
         lp.xr_socket_port = args.xr_socket_port
         lp.xr_max_frames = args.xr_max_frames
         lp.xr_match_swapchain_resolution_scale = args.xr_match_swapchain_resolution_scale
+        lp.xr_stream_upsample_scale = args.xr_stream_upsample_scale
+        lp.xr_stream_upsample_mode = args.xr_stream_upsample_mode
         lp.fix_lod = args.fix_lod if args.fix_lod >= 0 else getattr(lp, "fix_lod", -1)
         lp.render_point_cloud = args.render_point_cloud
     if args.enable_hybrid_render:

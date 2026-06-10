@@ -19,10 +19,12 @@ python render.py `
   --xr_config config/xr/openxr_road_anchor_train_street_00055.yaml `
   --xr_match_swapchain_resolution_scale `
   --xr_socket_host 127.0.0.1 `
-  --xr_socket_port 6110
-  --xr_anchor_budget 350000 `
-  --xr_max_anchor_distance 35 `
+  --xr_socket_port 6110 `
+  --xr_anchor_budget 600000 `
+  # --xr_max_anchor_distance 35 `
   # --xr_lod_anchor_budget 1000000 `
+
+  # 目前猜测是由于在视锥内部有大量的未剪枝点，导致后方视角的卡顿（限制视锥长度并不能减缓卡顿，也即说明多余的anchor点位于视角近处）
 
   # 启动 SteamVR/OpenXR 投放端
   cd D:\Code\horizonGS
@@ -35,4 +37,4 @@ python render.py `
   --pose-socket-host 127.0.0.1 `
   --pose-socket-port 6110 `
   --pose-socket-retry-seconds 60 `
-  --swapchain-scale 0.25
+  --swapchain-scale 0.5

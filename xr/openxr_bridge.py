@@ -149,13 +149,24 @@ def _get_view_pose_and_fov(frame, eye):
     return view, pose, fov
 
 
-def build_minicam_from_openxr_view(frame, eye, config, device="cuda"):
+def get_openxr_view_dimensions(frame, eye, config):
+    view, _, _ = _get_view_pose_and_fov(frame, str(eye).lower())
+    return _get_dimensions(view, config)
+
+
+def build_minicam_from_openxr_view(frame, eye, config, device="cuda", resolution_divisor=1.0):
     eye = str(eye).lower()
     view, pose, fov = _get_view_pose_and_fov(frame, eye)
 
     znear = float(view.get("near_z", config.get("near_z", 0.01)))
     zfar = float(view.get("far_z", config.get("far_z", 100.0)))
     width, height = _get_dimensions(view, config)
+    resolution_divisor = float(resolution_divisor)
+    if not math.isfinite(resolution_divisor) or resolution_divisor < 1.0:
+        resolution_divisor = 1.0
+    if resolution_divisor > 1.0:
+        width = max(int(round(width / resolution_divisor)), 1)
+        height = max(int(round(height / resolution_divisor)), 1)
     fx, fy, cx, cy, fovx, fovy = _fov_to_intrinsics(width, height, fov, znear)
 
     scene_from_tracking = _get_scene_from_tracking(config)
@@ -195,7 +206,7 @@ def build_minicam_from_openxr_view(frame, eye, config, device="cuda"):
         cx=cx,
         cy=cy,
         projection_matrix=projection_matrix,
-        resolution_scale=float(config.get("resolution_scale", 1.0)),
+        resolution_scale=float(config.get("resolution_scale", 1.0)) * resolution_divisor,
         image_name=f"{eye}_{int(frame.get('frame_id', 0)):05d}.png",
         image_path=f"{eye}_{int(frame.get('frame_id', 0)):05d}.png",
         image_type=image_type,

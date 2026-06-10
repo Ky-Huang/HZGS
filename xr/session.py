@@ -5,12 +5,13 @@ import socket
 import imageio.v2 as imageio
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchvision
 from PIL import Image
 from tqdm import tqdm
 
 from xr.frame_sources import SocketFrameSource, load_xr_frames
-from xr.openxr_bridge import build_minicam_from_openxr_view, load_xr_session_config
+from xr.openxr_bridge import build_minicam_from_openxr_view, get_openxr_view_dimensions, load_xr_session_config
 
 
 def _read_rgb_frame(path):
@@ -433,8 +434,49 @@ def _render_stereo_frame(frame, config, gaussians, pipe, background, render_fn, 
     return left_cam, right_cam, left_rgb, right_rgb
 
 
-def _tensor_to_rgba8_bytes(image):
+def _validate_stream_upsample_scale(value):
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid XR stream upsample scale: {value!r}.")
+    if not np.isfinite(scale) or scale < 1.0:
+        raise ValueError("--xr_stream_upsample_scale must be finite and >= 1.0.")
+    return scale
+
+
+def _validate_stream_upsample_mode(value):
+    mode = str(value or "bilinear").strip().lower()
+    valid_modes = {"nearest", "bilinear", "bicubic"}
+    if mode not in valid_modes:
+        raise ValueError(
+            f"--xr_stream_upsample_mode must be one of {sorted(valid_modes)}, got {value!r}."
+        )
+    return mode
+
+
+def _resize_tensor_image(image, output_size=None, mode="bilinear"):
+    if output_size is None:
+        return image
+    output_height, output_width = int(output_size[0]), int(output_size[1])
+    if output_width <= 0 or output_height <= 0:
+        raise ValueError("XR stream output size must be positive.")
+    if tuple(image.shape[-2:]) == (output_height, output_width):
+        return image
+
+    kwargs = {"mode": mode}
+    if mode in {"bilinear", "bicubic"}:
+        kwargs["align_corners"] = False
+    return F.interpolate(
+        image.unsqueeze(0),
+        size=(output_height, output_width),
+        **kwargs,
+    )[0]
+
+
+def _tensor_to_rgba8_bytes(image, output_size=None, upsample_mode="bilinear"):
     image = torch.clamp(image.detach(), 0.0, 1.0)
+    image = _resize_tensor_image(image, output_size=output_size, mode=upsample_mode)
+    image = torch.clamp(image, 0.0, 1.0)
     if image.shape[0] == 3:
         alpha = torch.ones((1, image.shape[1], image.shape[2]), device=image.device, dtype=image.dtype)
         image = torch.cat([image, alpha], dim=0)
@@ -575,8 +617,12 @@ def _run_openxr_stream_session(
     xr_socket_port,
     xr_max_frames,
     xr_match_swapchain_resolution_scale,
+    xr_stream_upsample_scale,
+    xr_stream_upsample_mode,
 ):
     config = load_xr_session_config(xr_config_path)
+    xr_stream_upsample_scale = _validate_stream_upsample_scale(xr_stream_upsample_scale)
+    xr_stream_upsample_mode = _validate_stream_upsample_mode(xr_stream_upsample_mode)
     reported_matched_resolution_scale = False
     reported_missing_swapchain_scale = False
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -588,6 +634,13 @@ def _run_openxr_stream_session(
         conn, addr = listener.accept()
         print(f"[openxr-stream] connected by {addr}")
         print(f"[openxr-stream] preflight_guard={_preflight_guard_config_summary()}", flush=True)
+        if xr_stream_upsample_scale > 1.0:
+            print(
+                "[openxr-stream] stream upsample enabled: "
+                f"render_size=swapchain/{xr_stream_upsample_scale:g} "
+                f"output_size=swapchain mode={xr_stream_upsample_mode}",
+                flush=True,
+            )
         rendered_count = 0
         fps_meter = _StreamFpsMeter()
         profile_meter = _StreamProfileMeter(_profile_enabled_from_env())
@@ -642,8 +695,20 @@ def _run_openxr_stream_session(
                 if profile_meter.enabled:
                     t_busy = profile_meter.now()
                     t_camera = profile_meter.now()
-                left_cam = build_minicam_from_openxr_view(payload, "left", config)
-                right_cam = build_minicam_from_openxr_view(payload, "right", config)
+                left_output_width, left_output_height = get_openxr_view_dimensions(payload, "left", config)
+                right_output_width, right_output_height = get_openxr_view_dimensions(payload, "right", config)
+                left_cam = build_minicam_from_openxr_view(
+                    payload,
+                    "left",
+                    config,
+                    resolution_divisor=xr_stream_upsample_scale,
+                )
+                right_cam = build_minicam_from_openxr_view(
+                    payload,
+                    "right",
+                    config,
+                    resolution_divisor=xr_stream_upsample_scale,
+                )
                 if profile_meter.enabled:
                     profile_meter.record("camera", profile_meter.elapsed_ms(t_camera))
 
@@ -706,8 +771,16 @@ def _run_openxr_stream_session(
                     slow_frame_log.flush()
                 if profile_meter.enabled:
                     t_pack = profile_meter.now()
-                left_bytes, left_width, left_height = _tensor_to_rgba8_bytes(left_rgb)
-                right_bytes, right_width, right_height = _tensor_to_rgba8_bytes(right_rgb)
+                left_bytes, left_width, left_height = _tensor_to_rgba8_bytes(
+                    left_rgb,
+                    output_size=(left_output_height, left_output_width),
+                    upsample_mode=xr_stream_upsample_mode,
+                )
+                right_bytes, right_width, right_height = _tensor_to_rgba8_bytes(
+                    right_rgb,
+                    output_size=(right_output_height, right_output_width),
+                    upsample_mode=xr_stream_upsample_mode,
+                )
                 if profile_meter.enabled:
                     profile_meter.record("pack_rgba", profile_meter.elapsed_ms(t_pack))
                 if left_width != right_width or left_height != right_height:
@@ -787,6 +860,8 @@ def run_openxr_render_session(
     xr_socket_port=6110,
     xr_max_frames=-1,
     xr_match_swapchain_resolution_scale=False,
+    xr_stream_upsample_scale=1.0,
+    xr_stream_upsample_mode="bilinear",
 ):
     if xr_mode == "openxr_stream":
         return _run_openxr_stream_session(
@@ -800,6 +875,8 @@ def run_openxr_render_session(
             xr_socket_port=xr_socket_port,
             xr_max_frames=xr_max_frames,
             xr_match_swapchain_resolution_scale=xr_match_swapchain_resolution_scale,
+            xr_stream_upsample_scale=xr_stream_upsample_scale,
+            xr_stream_upsample_mode=xr_stream_upsample_mode,
         )
 
     config = load_xr_session_config(xr_config_path)
